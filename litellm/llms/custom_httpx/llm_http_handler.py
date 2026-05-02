@@ -155,7 +155,24 @@ else:
     LiteLLMLoggingObj = Any
 
 
+class AgenticLoopSafetyError(ValueError):
+    """Raised when agentic-loop bounded execution guards abort a rerun."""
+
+
 class BaseLLMHTTPHandler:
+    @staticmethod
+    def _preserve_deployment_credentials_for_agentic_kwargs(
+        kwargs: Optional[Dict[str, Any]],
+        api_key: Optional[str],
+        api_base: Optional[str],
+    ) -> Dict[str, Any]:
+        agentic_kwargs = {**(kwargs or {})}
+        if api_key is not None:
+            agentic_kwargs["api_key"] = api_key
+        if api_base is not None:
+            agentic_kwargs["api_base"] = api_base
+        return agentic_kwargs
+
     async def _make_common_async_call(
         self,
         async_httpx_client: AsyncHTTPHandler,
@@ -572,7 +589,7 @@ class BaseLLMHTTPHandler:
             litellm_params=litellm_params,
             logging_obj=logging_obj,
         )
-        return provider_config.transform_response(
+        initial_response = provider_config.transform_response(
             model=model,
             raw_response=response,
             model_response=model_response,
@@ -585,6 +602,18 @@ class BaseLLMHTTPHandler:
             encoding=encoding,
             json_mode=json_mode,
         )
+        final_response = self._call_agentic_chat_completion_hooks_sync(
+            response=initial_response,
+            model=model,
+            messages=messages,
+            optional_params=optional_params,
+            logging_obj=logging_obj,
+            stream=False,
+            custom_llm_provider=custom_llm_provider,
+            kwargs=litellm_params,
+        )
+
+        return final_response if final_response is not None else initial_response
 
     def make_sync_call(
         self,
@@ -1949,6 +1978,11 @@ class BaseLLMHTTPHandler:
             api_key=api_key,
             api_base=api_base,
         )
+        agentic_kwargs = self._preserve_deployment_credentials_for_agentic_kwargs(
+            kwargs=kwargs,
+            api_key=api_key,
+            api_base=api_base,
+        )
 
         headers = update_headers_with_filtered_beta(
             headers=headers, provider=custom_llm_provider
@@ -2065,7 +2099,7 @@ class BaseLLMHTTPHandler:
                 anthropic_messages_optional_request_params=anthropic_messages_optional_request_params,
                 logging_obj=logging_obj,
                 custom_llm_provider=custom_llm_provider,
-                kwargs=kwargs,
+                kwargs=agentic_kwargs,
             )
             return initial_response
         else:
@@ -2085,7 +2119,7 @@ class BaseLLMHTTPHandler:
             logging_obj=logging_obj,
             stream=False,
             custom_llm_provider=custom_llm_provider,
-            kwargs=kwargs,
+            kwargs=agentic_kwargs,
         )
 
         return final_response if final_response is not None else initial_response
@@ -4566,11 +4600,11 @@ class BaseLLMHTTPHandler:
         """
         fingerprint = BaseLLMHTTPHandler._fingerprint_agentic_tools(tool_calls)
         if fingerprint in fingerprints:
-            raise ValueError(
+            raise AgenticLoopSafetyError(
                 "Agentic loop detected repeated tool-call fingerprint; aborting rerun"
             )
         if depth >= max_loops:
-            raise ValueError(
+            raise AgenticLoopSafetyError(
                 f"Exceeded max_agentic_loops={max_loops} for model={model}"
             )
         return fingerprint
@@ -4581,6 +4615,95 @@ class BaseLLMHTTPHandler:
             return json.dumps(tools, sort_keys=True, default=str)
         except Exception:
             return str(tools)
+
+    @staticmethod
+    def _maybe_wrap_websearch_converted_stream_response(
+        response: Any,
+        logging_obj: Optional["LiteLLMLoggingObj"],
+    ) -> Any:
+        websearch_converted_stream = (
+            logging_obj.model_call_details.get(
+                "websearch_interception_converted_stream", False
+            )
+            if logging_obj is not None
+            else False
+        )
+        if websearch_converted_stream and isinstance(response, dict):
+            from litellm.llms.anthropic.experimental_pass_through.messages.fake_stream_iterator import (
+                FakeAnthropicMessagesStreamIterator,
+            )
+            from litellm.litellm_core_utils.streaming_handler import (
+                mark_logging_obj_as_streaming,
+            )
+
+            verbose_logger.debug(
+                "WebSearchInterception: converting non-streaming response to fake stream"
+            )
+            mark_logging_obj_as_streaming(logging_obj)
+            return FakeAnthropicMessagesStreamIterator(
+                response=cast(AnthropicMessagesResponse, response)
+            )
+        return response
+
+    @staticmethod
+    def _maybe_wrap_websearch_converted_chat_stream_response(
+        response: Any,
+        logging_obj: Optional["LiteLLMLoggingObj"],
+        model: str,
+    ) -> Any:
+        websearch_converted_stream = (
+            logging_obj.model_call_details.get(
+                "websearch_interception_converted_stream", False
+            )
+            if logging_obj is not None
+            else False
+        )
+        if not websearch_converted_stream or not hasattr(response, "choices"):
+            return response
+
+        from litellm.llms.base_llm.base_model_iterator import (
+            convert_model_response_to_streaming,
+        )
+        from litellm.litellm_core_utils.streaming_handler import (
+            mark_logging_obj_as_streaming,
+        )
+
+        verbose_logger.debug(
+            "WebSearchInterception: converting non-streaming chat completion to fake stream"
+        )
+        mark_logging_obj_as_streaming(logging_obj)
+        fake_stream_chunk = convert_model_response_to_streaming(response)
+        return CustomStreamWrapper(
+            completion_stream=iter([fake_stream_chunk]),
+            model=model,
+            custom_llm_provider="cached_response",
+            logging_obj=logging_obj,
+        )
+
+    def _call_agentic_chat_completion_hooks_sync(
+        self,
+        response: Any,
+        model: str,
+        messages: List[Dict],
+        optional_params: Dict,
+        logging_obj: "LiteLLMLoggingObj",
+        stream: bool,
+        custom_llm_provider: str,
+        kwargs: Dict,
+    ) -> Optional[Any]:
+        from litellm.litellm_core_utils.asyncify import run_async_function
+
+        return run_async_function(
+            self._call_agentic_chat_completion_hooks,
+            response=response,
+            model=model,
+            messages=messages,
+            optional_params=optional_params,
+            logging_obj=logging_obj,
+            stream=stream,
+            custom_llm_provider=custom_llm_provider,
+            kwargs=kwargs,
+        )
 
     async def _execute_anthropic_agentic_plan(
         self,
@@ -4621,6 +4744,8 @@ class BaseLLMHTTPHandler:
             optional_params.pop("max_tokens", None)
         if max_tokens is None:
             max_tokens = cast(int, kwargs.get("max_tokens", 1024))
+        followup_param_keys = set(optional_params)
+        followup_param_keys.add("max_tokens")
 
         internal_keys = {"litellm_logging_obj"}
         kwargs_for_followup = {
@@ -4629,9 +4754,11 @@ class BaseLLMHTTPHandler:
             if not k.startswith("_websearch_interception")
             and not k.startswith("_compression_interception")
             and k not in internal_keys
-            and k not in optional_params
+            and k not in followup_param_keys
         }
-        kwargs_for_followup.update(patch.kwargs)
+        kwargs_for_followup.update(
+            {k: v for k, v in patch.kwargs.items() if k not in followup_param_keys}
+        )
         kwargs_for_followup["_agentic_loop_depth"] = depth + 1
         kwargs_for_followup["max_agentic_loops"] = max_loops
         kwargs_for_followup["_agentic_loop_fingerprints"] = fingerprints + [fingerprint]
@@ -4672,6 +4799,7 @@ class BaseLLMHTTPHandler:
         optional_params_for_followup.update(patch.optional_params)
         if patch.tools is not None:
             optional_params_for_followup["tools"] = patch.tools
+        followup_param_keys = set(optional_params_for_followup)
 
         internal_params = {
             "_websearch_interception",
@@ -4688,8 +4816,11 @@ class BaseLLMHTTPHandler:
             if not k.startswith("_websearch_interception")
             and not k.startswith("_compression_interception")
             and k not in internal_params
+            and k not in followup_param_keys
         }
-        kwargs_for_followup.update(patch.kwargs)
+        kwargs_for_followup.update(
+            {k: v for k, v in patch.kwargs.items() if k not in followup_param_keys}
+        )
         kwargs_for_followup["_agentic_loop_depth"] = depth + 1
         kwargs_for_followup["max_agentic_loops"] = max_loops
         kwargs_for_followup["_agentic_loop_fingerprints"] = fingerprints + [fingerprint]
@@ -4706,9 +4837,9 @@ class BaseLLMHTTPHandler:
         response: Any,
         model: str,
         messages: List[Dict],
-        anthropic_messages_provider_config: "BaseAnthropicMessagesConfig",
+        anthropic_messages_provider_config: Optional["BaseAnthropicMessagesConfig"],
         anthropic_messages_optional_request_params: Dict,
-        logging_obj: "LiteLLMLoggingObj",
+        logging_obj: Optional["LiteLLMLoggingObj"],
         stream: bool,
         custom_llm_provider: str,
         kwargs: Dict,
@@ -4724,7 +4855,9 @@ class BaseLLMHTTPHandler:
         from litellm._logging import verbose_logger
         from litellm.integrations.custom_logger import CustomLogger
 
-        callbacks = litellm.callbacks + (logging_obj.dynamic_success_callbacks or [])
+        callbacks = litellm.callbacks + (
+            getattr(logging_obj, "dynamic_success_callbacks", None) or []
+        )
         tools = anthropic_messages_optional_request_params.get("tools", [])
         depth, max_loops, fingerprints = self._get_agentic_loop_settings(kwargs=kwargs)
 
@@ -4782,7 +4915,7 @@ class BaseLLMHTTPHandler:
                     is not CustomLogger.async_build_agentic_loop_plan
                 )
                 if not build_plan_overridden:
-                    return await callback.async_run_agentic_loop(
+                    agentic_response = await callback.async_run_agentic_loop(
                         tools=tool_calls,
                         model=model,
                         messages=messages,
@@ -4792,6 +4925,10 @@ class BaseLLMHTTPHandler:
                         logging_obj=logging_obj,
                         stream=stream,
                         kwargs=kwargs_with_provider,
+                    )
+                    return self._maybe_wrap_websearch_converted_stream_response(
+                        response=agentic_response,
+                        logging_obj=logging_obj,
                     )
 
                 plan = await callback.async_build_agentic_loop_plan(
@@ -4807,18 +4944,24 @@ class BaseLLMHTTPHandler:
                 )
 
                 if plan.response_override is not None:
-                    return plan.response_override
+                    return self._maybe_wrap_websearch_converted_stream_response(
+                        response=plan.response_override,
+                        logging_obj=logging_obj,
+                    )
                 if plan.terminate:
                     verbose_logger.debug(
                         "Agentic loop terminated by callback=%s reason=%s",
                         callback.__class__.__name__,
                         plan.stop_reason,
                     )
-                    return response
+                    return self._maybe_wrap_websearch_converted_stream_response(
+                        response=response,
+                        logging_obj=logging_obj,
+                    )
                 if not plan.run_agentic_loop:
                     continue
 
-                return await self._execute_anthropic_agentic_plan(
+                agentic_response = await self._execute_anthropic_agentic_plan(
                     plan=plan,
                     model=model,
                     messages=messages,
@@ -4831,6 +4974,12 @@ class BaseLLMHTTPHandler:
                     fingerprint=fingerprint,
                     stream=stream,
                 )
+                return self._maybe_wrap_websearch_converted_stream_response(
+                    response=agentic_response,
+                    logging_obj=logging_obj,
+                )
+            except AgenticLoopSafetyError:
+                raise
             except Exception as e:
                 _call_id = getattr(logging_obj, "litellm_call_id", "unknown")
                 verbose_logger.exception(
@@ -4841,44 +4990,11 @@ class BaseLLMHTTPHandler:
                     str(e),
                 )
 
-        # Check if we need to convert response to fake stream
-        # This happens when:
-        # 1. Stream was originally True but converted to False for WebSearch interception
-        # 2. No agentic loop ran (LLM didn't use the tool)
-        # 3. We have a non-streaming response that needs to be converted to streaming
-        websearch_converted_stream = (
-            logging_obj.model_call_details.get(
-                "websearch_interception_converted_stream", False
-            )
-            if logging_obj is not None
-            else False
+        wrapped_response = self._maybe_wrap_websearch_converted_stream_response(
+            response=response,
+            logging_obj=logging_obj,
         )
-
-        if websearch_converted_stream:
-            from typing import cast
-
-            from litellm._logging import verbose_logger
-            from litellm.llms.anthropic.experimental_pass_through.messages.fake_stream_iterator import (
-                FakeAnthropicMessagesStreamIterator,
-            )
-            from litellm.types.llms.anthropic_messages.anthropic_response import (
-                AnthropicMessagesResponse,
-            )
-
-            verbose_logger.debug(
-                "WebSearchInterception: No tool call made, converting non-streaming response to fake stream"
-            )
-
-            # Convert the non-streaming response to a fake stream
-            # The response should be an AnthropicMessagesResponse (dict)
-            if isinstance(response, dict):
-                # Create a fake streaming iterator
-                fake_stream = FakeAnthropicMessagesStreamIterator(
-                    response=cast(AnthropicMessagesResponse, response)
-                )
-                return fake_stream
-
-        return None
+        return wrapped_response if wrapped_response is not response else None
 
     async def _call_agentic_chat_completion_hooks(
         self,
@@ -4956,15 +5072,22 @@ class BaseLLMHTTPHandler:
                     is not CustomLogger.async_build_chat_completion_agentic_loop_plan
                 )
                 if not build_plan_overridden:
-                    return await callback.async_run_chat_completion_agentic_loop(
-                        tools=tool_calls,
-                        model=model,
-                        messages=messages,
-                        response=response,
-                        optional_params=optional_params,
+                    agentic_response = (
+                        await callback.async_run_chat_completion_agentic_loop(
+                            tools=tool_calls,
+                            model=model,
+                            messages=messages,
+                            response=response,
+                            optional_params=optional_params,
+                            logging_obj=logging_obj,
+                            stream=stream,
+                            kwargs=kwargs_with_provider,
+                        )
+                    )
+                    return self._maybe_wrap_websearch_converted_chat_stream_response(
+                        response=agentic_response,
                         logging_obj=logging_obj,
-                        stream=stream,
-                        kwargs=kwargs_with_provider,
+                        model=model,
                     )
 
                 plan = await callback.async_build_chat_completion_agentic_loop_plan(
@@ -4979,18 +5102,26 @@ class BaseLLMHTTPHandler:
                 )
 
                 if plan.response_override is not None:
-                    return plan.response_override
+                    return self._maybe_wrap_websearch_converted_chat_stream_response(
+                        response=plan.response_override,
+                        logging_obj=logging_obj,
+                        model=model,
+                    )
                 if plan.terminate:
                     verbose_logger.debug(
                         "Agentic chat loop terminated by callback=%s reason=%s",
                         callback.__class__.__name__,
                         plan.stop_reason,
                     )
-                    return response
+                    return self._maybe_wrap_websearch_converted_chat_stream_response(
+                        response=response,
+                        logging_obj=logging_obj,
+                        model=model,
+                    )
                 if not plan.run_agentic_loop:
                     continue
 
-                return await self._execute_chat_completion_agentic_plan(
+                agentic_response = await self._execute_chat_completion_agentic_plan(
                     plan=plan,
                     model=model,
                     messages=messages,
@@ -5002,41 +5133,24 @@ class BaseLLMHTTPHandler:
                     fingerprints=fingerprints,
                     fingerprint=fingerprint,
                 )
+                return self._maybe_wrap_websearch_converted_chat_stream_response(
+                    response=agentic_response,
+                    logging_obj=logging_obj,
+                    model=model,
+                )
+            except AgenticLoopSafetyError:
+                raise
             except Exception as e:
                 verbose_logger.exception(
                     f"LiteLLM.AgenticHookError: Exception in chat completion agentic hooks: {str(e)}"
                 )
 
-        # Check if we need to convert response to fake stream for chat completions
-        # This happens when:
-        # 1. Stream was originally True but converted to False for WebSearch interception
-        # 2. No agentic loop ran (LLM didn't use the tool)
-        # 3. We have a non-streaming response that needs to be converted to streaming
-        websearch_converted_stream = (
-            logging_obj.model_call_details.get(
-                "websearch_interception_converted_stream", False
-            )
-            if logging_obj is not None
-            else False
+        wrapped_response = self._maybe_wrap_websearch_converted_chat_stream_response(
+            response=response,
+            logging_obj=logging_obj,
+            model=model,
         )
-
-        if websearch_converted_stream:
-            from litellm._logging import verbose_logger
-            from litellm.llms.base_llm.base_model_iterator import (
-                convert_model_response_to_streaming,
-            )
-
-            verbose_logger.debug(
-                "WebSearchInterception: No tool call made, converting non-streaming chat completion to fake stream"
-            )
-
-            # Convert the non-streaming ModelResponse to a fake stream
-            if hasattr(response, "choices"):
-                # Use the existing converter for ModelResponse
-                fake_stream = convert_model_response_to_streaming(response)
-                return fake_stream
-
-        return None
+        return wrapped_response if wrapped_response is not response else None
 
     def _handle_error(
         self,

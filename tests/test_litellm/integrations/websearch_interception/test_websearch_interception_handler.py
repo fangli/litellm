@@ -4,6 +4,7 @@ Unit tests for WebSearch Interception Handler
 Tests the WebSearchInterceptionLogger class and helper functions.
 """
 
+from copy import deepcopy
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
@@ -11,7 +12,12 @@ import pytest
 from litellm.integrations.websearch_interception.handler import (
     WebSearchInterceptionLogger,
 )
-from litellm.types.utils import LlmProviders
+from litellm.integrations.websearch_interception.tools import (
+    get_litellm_web_search_tool_openai,
+    is_web_search_tool,
+)
+from litellm.llms.anthropic.chat.transformation import AnthropicConfig
+from litellm.types.utils import CallTypes, LlmProviders
 
 
 def test_initialize_from_proxy_config():
@@ -32,6 +38,12 @@ def test_initialize_from_proxy_config():
     assert LlmProviders.BEDROCK.value in logger.enabled_providers
     assert LlmProviders.VERTEX_AI.value in logger.enabled_providers
     assert logger.search_tool_name == "my-search"
+
+
+def test_is_web_search_tool_detects_openai_native_web_search():
+    """OpenAI native web_search tools should opt into LiteLLM search interception."""
+    assert is_web_search_tool({"type": "web_search"}) is True
+    assert is_web_search_tool({"type": "web_search_preview"}) is True
 
 
 @pytest.mark.asyncio
@@ -132,8 +144,6 @@ async def test_internal_flags_filtered_from_followup_kwargs():
     to the follow-up LLM request, causing "Extra inputs are not permitted" errors
     from providers like Bedrock that use strict parameter validation.
     """
-    logger = WebSearchInterceptionLogger(enabled_providers=["bedrock"])
-
     # Simulate kwargs that would be passed during agentic loop execution
     kwargs_with_internal_flags = {
         "_websearch_interception_converted_stream": True,
@@ -235,6 +245,85 @@ async def test_async_pre_call_deployment_hook_returns_full_kwargs():
         and t.get("function", {}).get("name") == "litellm_web_search"
         for t in result["tools"]
     )
+
+
+@pytest.mark.asyncio
+async def test_async_pre_call_deployment_hook_converts_openai_native_web_search():
+    """Chat Completions bridge should use LiteLLM hosted search for OpenAI web_search."""
+    logger = WebSearchInterceptionLogger(enabled_providers=["openai"])
+
+    kwargs = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "Search for something"}],
+        "tools": [{"type": "web_search"}],
+        "custom_llm_provider": "openai",
+        "stream": True,
+    }
+
+    result = await logger.async_pre_call_deployment_hook(
+        kwargs=kwargs, call_type=CallTypes.acompletion
+    )
+
+    assert result is not None
+    assert result["tools"] == [get_litellm_web_search_tool_openai()]
+    assert result["stream"] is False
+    assert result["_websearch_interception_converted_stream"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("call_type", [CallTypes.responses, CallTypes.aresponses])
+@pytest.mark.parametrize("tool_type", ["web_search_preview", "web_search"])
+async def test_async_pre_call_deployment_hook_preserves_native_responses_web_search(
+    call_type, tool_type
+):
+    """Native Responses calls should keep native web search tools."""
+    logger = WebSearchInterceptionLogger(enabled_providers=["openai"])
+
+    kwargs = {
+        "model": "openai/gpt-5.4-mini",
+        "input": [{"type": "message", "role": "user", "content": "Search LiteLLM"}],
+        "tools": [
+            {"type": tool_type},
+        ],
+        "custom_llm_provider": "openai",
+        "stream": True,
+    }
+    original_tools = deepcopy(kwargs["tools"])
+
+    result = await logger.async_pre_call_deployment_hook(
+        kwargs=kwargs, call_type=call_type
+    )
+
+    assert result is not None
+    assert result["tools"] == original_tools
+    assert result["stream"] is True
+    assert "_websearch_interception_converted_stream" not in result
+
+
+@pytest.mark.asyncio
+async def test_async_pre_call_deployment_hook_converts_responses_bridge_web_search():
+    """Responses bridge calls still need a LiteLLM function tool for interception."""
+    logger = WebSearchInterceptionLogger(enabled_providers=["openai"])
+
+    kwargs = {
+        "model": "openai/gpt-5.4-mini",
+        "input": [{"type": "message", "role": "user", "content": "Search LiteLLM"}],
+        "tools": [
+            {"type": "web_search_preview"},
+        ],
+        "custom_llm_provider": "openai",
+        "use_chat_completions_api": True,
+    }
+
+    result = await logger.async_pre_call_deployment_hook(
+        kwargs=kwargs, call_type=CallTypes.responses
+    )
+
+    assert result is not None
+    converted_tool = result["tools"][0]
+    assert converted_tool["type"] == "function"
+    assert converted_tool["name"] == "litellm_web_search"
+    assert "function" not in converted_tool
 
 
 @pytest.mark.asyncio
@@ -380,3 +469,75 @@ async def test_deployment_hook_converts_stream_and_logging_obj_syncs():
         logging_obj.stream = _hook_stream
 
     assert logging_obj.stream is False
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_websearch_followup_keeps_anthropic_system():
+    """
+    Regression coverage for OpenAI Chat -> Anthropic/Kiro continuations: the
+    first Anthropic translation must not consume the Chat Completions system
+    message before web-search interception builds its follow-up request.
+    """
+    logger = WebSearchInterceptionLogger(enabled_providers=["kiro"])
+    logger._execute_search = AsyncMock(return_value="Title: NBA\nURL: news\nSnippet: result")  # type: ignore
+    anthropic_config = AnthropicConfig()
+    messages = [
+        {
+            "role": "system",
+            "content": "Follow user instructions strictly. Use web search when needed.",
+        },
+        {
+            "role": "user",
+            "content": "Use web search to find current NBA news.",
+        },
+    ]
+    optional_params = {
+        "max_tokens": 1024,
+        "tools": [get_litellm_web_search_tool_openai()],
+    }
+
+    first_provider_request = anthropic_config.transform_request(
+        model="claude-haiku-4-5-20251001",
+        messages=messages,
+        optional_params=dict(optional_params),
+        litellm_params={},
+        headers={},
+    )
+    plan = await logger.async_build_chat_completion_agentic_loop_plan(
+        tools={
+            "tool_calls": [
+                {
+                    "id": "call_123",
+                    "type": "function",
+                    "name": "litellm_web_search",
+                    "input": {"query": "NBA news"},
+                }
+            ],
+            "response_format": "openai",
+        },
+        model="claude-haiku-4-5-20251001",
+        messages=messages,
+        response=None,
+        optional_params=optional_params,
+        logging_obj=MagicMock(),
+        stream=False,
+        kwargs={"custom_llm_provider": "kiro"},
+    )
+    assert plan.request_patch is not None
+    assert plan.request_patch.messages is not None
+
+    followup_provider_request = anthropic_config.transform_request(
+        model="claude-haiku-4-5-20251001",
+        messages=plan.request_patch.messages,
+        optional_params=dict(optional_params),
+        litellm_params={},
+        headers={},
+    )
+
+    assert followup_provider_request["system"] == first_provider_request["system"]
+    assert all(
+        message["role"] != "system" for message in first_provider_request["messages"]
+    )
+    assert all(
+        message["role"] != "system" for message in followup_provider_request["messages"]
+    )

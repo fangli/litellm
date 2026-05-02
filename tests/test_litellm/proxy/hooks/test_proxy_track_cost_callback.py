@@ -12,6 +12,7 @@ sys.path.insert(
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from litellm.litellm_core_utils.streaming_handler import CustomStreamWrapper
 from litellm.proxy._types import UserAPIKeyAuth
 from litellm.proxy.hooks.proxy_track_cost_callback import _ProxyDBLogger
 from litellm.types.utils import StandardLoggingPayload
@@ -492,6 +493,45 @@ async def test_track_cost_callback_skips_for_falsy_model_and_no_slo(model_value)
         )
 
         mock_proxy_logging.failed_tracking_alert.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_track_cost_callback_skips_stream_wrapper_without_slo():
+    logger = _ProxyDBLogger()
+
+    stream_logging_obj = MagicMock()
+    stream_logging_obj.model_call_details = {"litellm_params": {}}
+    stream_logging_obj.stream_options = None
+
+    completion_response = CustomStreamWrapper(
+        completion_stream=iter([]),
+        model="claude-haiku-4-5-20251001",
+        custom_llm_provider="cached_response",
+        logging_obj=stream_logging_obj,
+    )
+    kwargs = {
+        "call_type": "acompletion",
+        "model": "claude-haiku-4-5-20251001",
+        "litellm_params": {},
+        "stream": False,
+    }
+
+    with patch(
+        "litellm.proxy.proxy_server.proxy_logging_obj",
+    ) as mock_proxy_logging:
+        mock_proxy_logging.failed_tracking_alert = AsyncMock()
+        mock_proxy_logging.db_spend_update_writer = MagicMock()
+        mock_proxy_logging.db_spend_update_writer.update_database = AsyncMock()
+
+        await logger._PROXY_track_cost_callback(
+            kwargs=kwargs,
+            completion_response=completion_response,
+            start_time=datetime.now(),
+            end_time=datetime.now(),
+        )
+
+        mock_proxy_logging.failed_tracking_alert.assert_not_called()
+        mock_proxy_logging.db_spend_update_writer.update_database.assert_not_called()
 
 
 @pytest.mark.asyncio

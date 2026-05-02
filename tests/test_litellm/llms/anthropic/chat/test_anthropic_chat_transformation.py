@@ -1,5 +1,6 @@
 import os
 import sys
+from copy import deepcopy
 
 import pytest
 
@@ -1653,9 +1654,7 @@ def test_max_effort_rejected_for_opus_45():
 
     messages = [{"role": "user", "content": "Test"}]
 
-    with pytest.raises(
-        ValueError, match="effort='max' is not supported by this model"
-    ):
+    with pytest.raises(ValueError, match="effort='max' is not supported by this model"):
         optional_params = {"output_config": {"effort": "max"}}
         config.transform_request(
             model="claude-opus-4-5-20251101",
@@ -1802,6 +1801,42 @@ def test_translate_system_message_preserves_cache_control():
     assert len(result) == 1
     assert result[0]["text"] == "Cached content"
     assert result[0]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_transform_request_preserves_caller_messages_for_agentic_followup():
+    """
+    OpenAI Chat -> Anthropic/Kiro web-search interception builds the follow-up
+    request from the original Chat Completions messages after transform_request
+    has built the first provider request. The transformer must not remove the
+    caller's system message, or the continuation loses Anthropic's top-level
+    system prompt.
+    """
+    config = AnthropicConfig()
+    messages = [
+        {
+            "role": "system",
+            "content": "Follow user instructions strictly. Use tools when needed.",
+        },
+        {"role": "user", "content": "Search for current NBA news."},
+    ]
+    original_messages = deepcopy(messages)
+
+    result = config.transform_request(
+        model="claude-haiku-4-5-20251001",
+        messages=messages,
+        optional_params={"max_tokens": 1024},
+        litellm_params={},
+        headers={},
+    )
+
+    assert result["system"] == [
+        {
+            "type": "text",
+            "text": "Follow user instructions strictly. Use tools when needed.",
+        }
+    ]
+    assert all(message["role"] != "system" for message in result["messages"])
+    assert messages == original_messages
 
 
 # ============ Dynamic max_tokens Tests ============
@@ -2217,9 +2252,7 @@ def test_max_effort_rejected_for_sonnet_46():
     config = AnthropicConfig()
     messages = [{"role": "user", "content": "Test"}]
 
-    with pytest.raises(
-        ValueError, match="effort='max' is not supported by this model"
-    ):
+    with pytest.raises(ValueError, match="effort='max' is not supported by this model"):
         config.transform_request(
             model="claude-sonnet-4-6-20260219",
             messages=messages,

@@ -24,6 +24,12 @@ from litellm.types.utils import StandardLoggingPayload
 from litellm.utils import get_end_user_id_for_cost_tracking
 
 
+def _is_stream_wrapper_response(completion_response: Optional[Any]) -> bool:
+    from litellm.litellm_core_utils.streaming_handler import CustomStreamWrapper
+
+    return isinstance(completion_response, CustomStreamWrapper)
+
+
 class _ProxyDBLogger(CustomLogger):
     async def async_log_success_event(self, kwargs, response_obj, start_time, end_time):
         await self._PROXY_track_cost_callback(
@@ -244,6 +250,14 @@ class _ProxyDBLogger(CustomLogger):
                     verbose_proxy_logger.warning(
                         "Cost tracking - skipping, no standard_logging_object and no model for call_type=%s",
                         kwargs.get("call_type", "unknown"),
+                    )
+                    return
+                if sl_object is None and _is_stream_wrapper_response(
+                    completion_response
+                ):
+                    verbose_proxy_logger.debug(
+                        "Cost tracking - skipping in-progress stream wrapper for model=%s",
+                        kwargs.get("model"),
                     )
                     return
                 if kwargs.get("stream") is not True or (

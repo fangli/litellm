@@ -19,6 +19,98 @@ from .transformation import LiteLLMAnthropicToResponsesAPIAdapter
 _ADAPTER = LiteLLMAnthropicToResponsesAPIAdapter()
 
 
+def _build_anthropic_optional_params(
+    *,
+    max_tokens: int,
+    context_management: Optional[Dict] = None,
+    metadata: Optional[Dict] = None,
+    output_config: Optional[Dict] = None,
+    stop_sequences: Optional[List[str]] = None,
+    system: Optional[str] = None,
+    temperature: Optional[float] = None,
+    thinking: Optional[Dict] = None,
+    tool_choice: Optional[Dict] = None,
+    tools: Optional[List[Dict]] = None,
+    top_k: Optional[int] = None,
+    top_p: Optional[float] = None,
+    output_format: Optional[Dict] = None,
+) -> Dict[str, Any]:
+    optional_params: Dict[str, Any] = {"max_tokens": max_tokens}
+    for key, value in {
+        "context_management": context_management,
+        "metadata": metadata,
+        "output_config": output_config,
+        "stop_sequences": stop_sequences,
+        "system": system,
+        "temperature": temperature,
+        "thinking": thinking,
+        "tool_choice": tool_choice,
+        "tools": tools,
+        "top_k": top_k,
+        "top_p": top_p,
+        "output_format": output_format,
+    }.items():
+        if value is not None:
+            optional_params[key] = value
+    return optional_params
+
+
+async def _run_agentic_hooks_if_needed(
+    *,
+    response: AnthropicMessagesResponse,
+    model: str,
+    messages: List[Dict],
+    stream: bool,
+    anthropic_messages_optional_request_params: Dict[str, Any],
+    kwargs: Dict[str, Any],
+) -> Union[AnthropicMessagesResponse, AsyncIterator]:
+    from litellm.llms.custom_httpx.llm_http_handler import BaseLLMHTTPHandler
+
+    logging_obj = kwargs.get("litellm_logging_obj")
+    if (
+        kwargs.get("_websearch_interception_converted_stream")
+        and logging_obj is not None
+    ):
+        logging_obj.model_call_details["websearch_interception_converted_stream"] = True
+
+    custom_llm_provider = kwargs.get("custom_llm_provider", "")
+    callback_kwargs = {**kwargs, "custom_llm_provider": custom_llm_provider}
+    agentic_response = await BaseLLMHTTPHandler()._call_agentic_completion_hooks(
+        response=response,
+        model=model,
+        messages=messages,
+        anthropic_messages_provider_config=None,  # type: ignore[arg-type]
+        anthropic_messages_optional_request_params=anthropic_messages_optional_request_params,
+        logging_obj=logging_obj,
+        stream=stream,
+        custom_llm_provider=custom_llm_provider,
+        kwargs=callback_kwargs,
+    )
+    return agentic_response if agentic_response is not None else response
+
+
+def _run_agentic_hooks_if_needed_sync(
+    *,
+    response: AnthropicMessagesResponse,
+    model: str,
+    messages: List[Dict],
+    stream: bool,
+    anthropic_messages_optional_request_params: Dict[str, Any],
+    kwargs: Dict[str, Any],
+) -> Union[AnthropicMessagesResponse, AsyncIterator]:
+    from litellm.litellm_core_utils.asyncify import run_async_function
+
+    return run_async_function(
+        _run_agentic_hooks_if_needed,
+        response=response,
+        model=model,
+        messages=messages,
+        stream=stream,
+        anthropic_messages_optional_request_params=anthropic_messages_optional_request_params,
+        kwargs=kwargs,
+    )
+
+
 def _build_responses_kwargs(
     *,
     max_tokens: int,
@@ -102,10 +194,7 @@ def _build_responses_kwargs(
             from litellm.types.utils import CallTypes
 
             if isinstance(value, LiteLLMLoggingObject):
-                # Reclassify as acompletion so the success handler doesn't try to
-                # validate the Responses API event as an AnthropicResponse.
-                # (Mirrors the pattern used in LiteLLMMessagesToCompletionTransformationHandler.)
-                setattr(value, "call_type", CallTypes.anthropic_messages.value)
+                setattr(value, "call_type", CallTypes.responses.value)
             responses_kwargs[key] = value
         elif key not in excluded and key not in responses_kwargs and value is not None:
             responses_kwargs[key] = value
@@ -171,7 +260,29 @@ class LiteLLMMessagesToResponsesAPIHandler:
         if not isinstance(result, ResponsesAPIResponse):
             raise ValueError(f"Expected ResponsesAPIResponse, got {type(result)}")
 
-        return _ADAPTER.translate_response(result)
+        translated_response = _ADAPTER.translate_response(result)
+        return await _run_agentic_hooks_if_needed(
+            response=translated_response,
+            model=model,
+            messages=messages,
+            stream=bool(stream),
+            anthropic_messages_optional_request_params=_build_anthropic_optional_params(
+                max_tokens=max_tokens,
+                context_management=context_management,
+                metadata=metadata,
+                output_config=output_config,
+                stop_sequences=stop_sequences,
+                system=system,
+                temperature=temperature,
+                thinking=thinking,
+                tool_choice=tool_choice,
+                tools=tools,
+                top_k=top_k,
+                top_p=top_p,
+                output_format=output_format,
+            ),
+            kwargs=kwargs,
+        )
 
     @staticmethod
     def anthropic_messages_handler(
@@ -253,4 +364,26 @@ class LiteLLMMessagesToResponsesAPIHandler:
         if not isinstance(result, ResponsesAPIResponse):
             raise ValueError(f"Expected ResponsesAPIResponse, got {type(result)}")
 
-        return _ADAPTER.translate_response(result)
+        translated_response = _ADAPTER.translate_response(result)
+        return _run_agentic_hooks_if_needed_sync(
+            response=translated_response,
+            model=model,
+            messages=messages,
+            stream=bool(stream),
+            anthropic_messages_optional_request_params=_build_anthropic_optional_params(
+                max_tokens=max_tokens,
+                context_management=context_management,
+                metadata=metadata,
+                output_config=output_config,
+                stop_sequences=stop_sequences,
+                system=system,
+                temperature=temperature,
+                thinking=thinking,
+                tool_choice=tool_choice,
+                tools=tools,
+                top_k=top_k,
+                top_p=top_p,
+                output_format=output_format,
+            ),
+            kwargs=kwargs,
+        )

@@ -82,6 +82,33 @@ def get_litellm_web_search_tool_openai() -> Dict[str, Any]:
     }
 
 
+def get_litellm_web_search_tool_responses_api() -> Dict[str, Any]:
+    """
+    Get the standard LiteLLM web search tool definition in Responses API format.
+
+    Responses API function tools use a direct shape instead of the nested
+    Chat Completions `function` object.
+    """
+    return {
+        "type": "function",
+        "name": LITELLM_WEB_SEARCH_TOOL_NAME,
+        "description": (
+            "Search the web for information. Use this when you need current "
+            "information or answers to questions that require up-to-date data."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The search query to execute",
+                }
+            },
+            "required": ["query"],
+        },
+    }
+
+
 def is_web_search_tool_chat_completion(tool: Dict[str, Any]) -> bool:
     """
     Check if a tool is a web search tool for Chat Completions API (strict check).
@@ -133,6 +160,7 @@ def is_web_search_tool(tool: Dict[str, Any]) -> bool:
     Detects:
     - LiteLLM standard: name == "litellm_web_search"
     - OpenAI format: type == "function" with function.name == "litellm_web_search"
+    - OpenAI native: type == "web_search"
     - Anthropic native: type starts with "web_search_" (e.g., "web_search_20250305")
     - Claude Code: name == "web_search" with a type field
     - Custom: name == "WebSearch" (legacy format)
@@ -147,6 +175,8 @@ def is_web_search_tool(tool: Dict[str, Any]) -> bool:
         >>> is_web_search_tool({"name": "litellm_web_search"})
         True
         >>> is_web_search_tool({"type": "function", "function": {"name": "litellm_web_search"}})
+        True
+        >>> is_web_search_tool({"type": "web_search"})
         True
         >>> is_web_search_tool({"type": "web_search_20250305", "name": "web_search"})
         True
@@ -167,8 +197,8 @@ def is_web_search_tool(tool: Dict[str, Any]) -> bool:
     if tool_name == LITELLM_WEB_SEARCH_TOOL_NAME:
         return True
 
-    # Check for native Anthropic web_search_* types
-    if tool_type.startswith("web_search_"):
+    # Check for native Anthropic web_search_* types including OpenAI's "web_search"
+    if tool_type.startswith("web_search"):
         return True
 
     # Check for Claude Code's web_search with a type field

@@ -1020,6 +1020,40 @@ def test_tool_message_output_uses_input_text_not_output_text():
     print("✓ Tool message output correctly uses input_text type")
 
 
+def test_system_message_list_content_is_converted_to_instructions():
+    """System list content should not become a Responses input message."""
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        LiteLLMResponsesTransformationHandler,
+    )
+
+    handler = LiteLLMResponsesTransformationHandler()
+
+    input_items, instructions = (
+        handler.convert_chat_completion_messages_to_responses_api(
+            [
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "text", "text": "You are concise."},
+                        {"type": "input_text", "text": "Follow policy."},
+                    ],
+                },
+                {"role": "user", "content": "Hello"},
+            ]
+        )
+    )
+
+    assert instructions == "You are concise.\nFollow policy."
+    assert all(item.get("role") != "system" for item in input_items)
+    assert input_items == [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Hello"}],
+        }
+    ]
+
+
 def test_multiple_tool_calls_in_single_choice():
     """
     Test that multiple tool calls are grouped into a single choice.

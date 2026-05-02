@@ -95,6 +95,22 @@ def print_verbose(print_statement):
         pass
 
 
+def mark_logging_obj_as_streaming(logging_obj: Any) -> None:
+    """
+    Keep logging state aligned when a non-stream provider response is wrapped and
+    returned to the caller as a stream.
+    """
+    if logging_obj is None:
+        return
+
+    if hasattr(logging_obj, "stream"):
+        logging_obj.stream = True
+
+    model_call_details = getattr(logging_obj, "model_call_details", None)
+    if isinstance(model_call_details, dict):
+        model_call_details["stream"] = True
+
+
 class CustomStreamWrapper:
     def __init__(
         self,

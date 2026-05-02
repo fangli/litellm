@@ -119,6 +119,28 @@ class LiteLLMResponsesTransformationHandler(CompletionTransformationBridge):
     def __init__(self):
         pass
 
+    @staticmethod
+    def _convert_system_content_to_instructions(content: Any) -> Optional[str]:
+        if isinstance(content, str):
+            return content
+
+        if isinstance(content, list):
+            text_blocks: List[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    text_blocks.append(item)
+                elif isinstance(item, dict) and item.get("type") in (
+                    "text",
+                    "input_text",
+                ):
+                    text = item.get("text")
+                    if isinstance(text, str):
+                        text_blocks.append(text)
+            if text_blocks:
+                return "\n".join(text_blocks)
+
+        return None
+
     def _handle_raw_dict_response_item(
         self, item: Dict[str, Any], index: int
     ) -> Tuple[Optional[Any], int]:
@@ -213,24 +235,15 @@ class LiteLLMResponsesTransformationHandler(CompletionTransformationBridge):
             tool_call_id = msg.get("tool_call_id")
 
             if role == "system":
-                # Extract system message as instructions
-                if isinstance(content, str):
+                system_instructions = self._convert_system_content_to_instructions(
+                    content
+                )
+                if system_instructions:
                     if instructions:
                         # Concatenate multiple system prompts with a space
-                        instructions = f"{instructions} {content}"
+                        instructions = f"{instructions} {system_instructions}"
                     else:
-                        instructions = content
-                else:
-                    input_items.append(
-                        {
-                            "type": "message",
-                            "role": role,
-                            "content": self._convert_content_to_responses_format(
-                                content,  # type: ignore[arg-type]
-                                role,  # type: ignore
-                            ),
-                        }
-                    )
+                        instructions = system_instructions
             elif role == "tool":
                 # Convert tool message to function call output format
                 # The Responses API expects 'output' to be a list with input_text/input_image types
@@ -677,7 +690,7 @@ class LiteLLMResponsesTransformationHandler(CompletionTransformationBridge):
     def _convert_content_str_to_input_text(
         self, content: str, role: str
     ) -> Dict[str, Any]:
-        if role == "user" or role == "system" or role == "tool":
+        if role == "user" or role == "system" or role == "developer" or role == "tool":
             return {"type": "input_text", "text": content}
         else:
             return {"type": "output_text", "text": content}

@@ -1600,6 +1600,8 @@ def completion(  # type: ignore # noqa: PLR0915
             tpm=kwargs.get("tpm"),
             rpm=kwargs.get("rpm"),
         )
+        if kwargs.get("_websearch_interception_converted_stream", False):
+            litellm_params["_websearch_interception_converted_stream"] = True
         cast(LiteLLMLoggingObj, logging).update_environment_variables(
             model=model,
             user=user,

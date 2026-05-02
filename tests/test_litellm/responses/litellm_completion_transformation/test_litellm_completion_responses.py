@@ -1,5 +1,6 @@
 import os
 import sys
+from types import SimpleNamespace
 
 sys.path.insert(
     0, os.path.abspath("../../..")
@@ -26,6 +27,21 @@ from litellm.types.utils import (
 
 
 class TestLiteLLMCompletionResponsesConfig:
+    def test_convert_response_function_tool_call_preserves_passed_index(self):
+        """Parallel Responses function calls must keep distinct ChatCompletion indexes."""
+        tool_call = SimpleNamespace(
+            call_id="call_2",
+            name="exec",
+            arguments='{"command":"sw_vers"}',
+        )
+
+        converted_tool_call = LiteLLMCompletionResponsesConfig.convert_response_function_tool_call_to_chat_completion_tool_call(
+            tool_call_item=tool_call,
+            index=2,
+        )
+
+        assert converted_tool_call["index"] == 2
+
     def test_transform_input_file_item_to_file_item_with_file_id(self):
         """Test transformation of input_file item with file_id to Chat Completion file format"""
         # Setup

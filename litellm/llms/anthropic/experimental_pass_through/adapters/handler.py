@@ -15,6 +15,11 @@ import litellm
 from litellm.llms.anthropic.experimental_pass_through.adapters.transformation import (
     AnthropicAdapter,
 )
+from litellm.llms.anthropic.experimental_pass_through.responses_adapters.handler import (
+    _build_anthropic_optional_params,
+    _run_agentic_hooks_if_needed,
+    _run_agentic_hooks_if_needed_sync,
+)
 from litellm.llms.anthropic.experimental_pass_through.utils import (
     is_reasoning_auto_summary_enabled,
 )
@@ -302,6 +307,13 @@ class LiteLLMMessagesToCompletionTransformationHandler:
         )
 
         completion_response = await litellm.acompletion(**completion_kwargs)
+        stream = bool(
+            stream
+            or completion_kwargs.get("stream", False)
+            or hasattr(completion_response, "__aiter__")
+            or hasattr(completion_response, "__iter__")
+            and not isinstance(completion_response, ModelResponse)
+        )
 
         if stream:
             transformed_stream = (
@@ -320,7 +332,26 @@ class LiteLLMMessagesToCompletionTransformationHandler:
                 tool_name_mapping=tool_name_mapping,
             )
             if anthropic_response is not None:
-                return anthropic_response
+                return await _run_agentic_hooks_if_needed(
+                    response=anthropic_response,
+                    model=model,
+                    messages=messages,
+                    stream=bool(stream),
+                    anthropic_messages_optional_request_params=_build_anthropic_optional_params(
+                        max_tokens=max_tokens,
+                        metadata=metadata,
+                        stop_sequences=stop_sequences,
+                        system=system,
+                        temperature=temperature,
+                        thinking=thinking,
+                        tool_choice=tool_choice,
+                        tools=tools,
+                        top_k=top_k,
+                        top_p=top_p,
+                        output_format=output_format,
+                    ),
+                    kwargs=kwargs,
+                )
             raise ValueError("Failed to transform response to Anthropic format")
 
     @staticmethod
@@ -388,6 +419,12 @@ class LiteLLMMessagesToCompletionTransformationHandler:
         )
 
         completion_response = litellm.completion(**completion_kwargs)
+        stream = bool(
+            stream
+            or completion_kwargs.get("stream", False)
+            or hasattr(completion_response, "__iter__")
+            and not isinstance(completion_response, ModelResponse)
+        )
 
         if stream:
             transformed_stream = (
@@ -406,5 +443,24 @@ class LiteLLMMessagesToCompletionTransformationHandler:
                 tool_name_mapping=tool_name_mapping,
             )
             if anthropic_response is not None:
-                return anthropic_response
+                return _run_agentic_hooks_if_needed_sync(
+                    response=anthropic_response,
+                    model=model,
+                    messages=messages,
+                    stream=bool(stream),
+                    anthropic_messages_optional_request_params=_build_anthropic_optional_params(
+                        max_tokens=max_tokens,
+                        metadata=metadata,
+                        stop_sequences=stop_sequences,
+                        system=system,
+                        temperature=temperature,
+                        thinking=thinking,
+                        tool_choice=tool_choice,
+                        tools=tools,
+                        top_k=top_k,
+                        top_p=top_p,
+                        output_format=output_format,
+                    ),
+                    kwargs=kwargs,
+                )
             raise ValueError("Failed to transform response to Anthropic format")

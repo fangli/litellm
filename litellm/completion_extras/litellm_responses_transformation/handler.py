@@ -142,6 +142,205 @@ class ResponsesToCompletionBridgeHandler:
             custom_llm_provider=custom_llm_provider,
         )
 
+    @staticmethod
+    def _mark_websearch_converted_stream_if_needed(
+        logging_obj: "LiteLLMLoggingObj",
+        optional_params: dict,
+        litellm_params: dict,
+    ) -> None:
+        converted_stream = bool(
+            optional_params.get("_websearch_interception_converted_stream")
+            or litellm_params.get("_websearch_interception_converted_stream")
+        )
+        if converted_stream:
+            logging_obj.model_call_details[
+                "websearch_interception_converted_stream"
+            ] = True
+
+    @staticmethod
+    def _call_agentic_chat_completion_hooks_sync(
+        *,
+        response: "ModelResponse",
+        model: str,
+        messages: list,
+        optional_params: dict,
+        logging_obj: "LiteLLMLoggingObj",
+        stream: bool,
+        custom_llm_provider: str,
+        litellm_params: dict,
+    ) -> Optional[Any]:
+        from litellm.llms.custom_httpx.llm_http_handler import BaseLLMHTTPHandler
+
+        return BaseLLMHTTPHandler()._call_agentic_chat_completion_hooks_sync(
+            response=response,
+            model=model,
+            messages=messages,
+            optional_params=optional_params,
+            logging_obj=logging_obj,
+            stream=stream,
+            custom_llm_provider=custom_llm_provider,
+            kwargs=litellm_params,
+        )
+
+    @staticmethod
+    async def _call_agentic_chat_completion_hooks(
+        *,
+        response: "ModelResponse",
+        model: str,
+        messages: list,
+        optional_params: dict,
+        logging_obj: "LiteLLMLoggingObj",
+        stream: bool,
+        custom_llm_provider: str,
+        litellm_params: dict,
+    ) -> Optional[Any]:
+        from litellm.llms.custom_httpx.llm_http_handler import BaseLLMHTTPHandler
+
+        return await BaseLLMHTTPHandler()._call_agentic_chat_completion_hooks(
+            response=response,
+            model=model,
+            messages=messages,
+            optional_params=optional_params,
+            logging_obj=logging_obj,
+            stream=stream,
+            custom_llm_provider=custom_llm_provider,
+            kwargs=litellm_params,
+        )
+
+    @staticmethod
+    def _wrap_chat_response_for_stream_if_needed(
+        *,
+        response: Any,
+        stream: bool,
+        model: str,
+        logging_obj: "LiteLLMLoggingObj",
+    ) -> Any:
+        if not stream or not hasattr(response, "choices"):
+            return response
+
+        from litellm.llms.base_llm.base_model_iterator import (
+            convert_model_response_to_streaming,
+        )
+        from litellm.litellm_core_utils.streaming_handler import (
+            CustomStreamWrapper,
+            mark_logging_obj_as_streaming,
+        )
+
+        mark_logging_obj_as_streaming(logging_obj)
+        fake_stream_chunk = convert_model_response_to_streaming(response)
+        return CustomStreamWrapper(
+            completion_stream=iter([fake_stream_chunk]),
+            model=model,
+            custom_llm_provider="cached_response",
+            logging_obj=logging_obj,
+        )
+
+    def _transform_response_and_run_agentic_hooks(
+        self,
+        *,
+        model: str,
+        raw_response: "ResponsesAPIResponse",
+        model_response: "ModelResponse",
+        logging_obj: "LiteLLMLoggingObj",
+        request_data: dict,
+        messages: list,
+        optional_params: dict,
+        litellm_params: dict,
+        custom_llm_provider: str,
+        encoding: Any,
+        api_key: Optional[str],
+        json_mode: Optional[bool],
+    ) -> Union["ModelResponse", "CustomStreamWrapper"]:
+        stream = self._resolve_stream_flag(optional_params, litellm_params)
+        response = self.transformation_handler.transform_response(
+            model=model,
+            raw_response=raw_response,
+            model_response=model_response,
+            logging_obj=logging_obj,
+            request_data=request_data,
+            messages=messages,
+            optional_params=optional_params,
+            litellm_params=litellm_params,
+            encoding=encoding,
+            api_key=api_key,
+            json_mode=json_mode,
+        )
+        self._mark_websearch_converted_stream_if_needed(
+            logging_obj=logging_obj,
+            optional_params=optional_params,
+            litellm_params=litellm_params,
+        )
+        agentic_response = self._call_agentic_chat_completion_hooks_sync(
+            response=response,
+            model=model,
+            messages=messages,
+            optional_params=optional_params,
+            logging_obj=logging_obj,
+            stream=stream,
+            custom_llm_provider=custom_llm_provider,
+            litellm_params=litellm_params,
+        )
+        final_response = agentic_response if agentic_response is not None else response
+        return self._wrap_chat_response_for_stream_if_needed(
+            response=final_response,
+            stream=stream,
+            model=model,
+            logging_obj=logging_obj,
+        )
+
+    async def _atransform_response_and_run_agentic_hooks(
+        self,
+        *,
+        model: str,
+        raw_response: "ResponsesAPIResponse",
+        model_response: "ModelResponse",
+        logging_obj: "LiteLLMLoggingObj",
+        request_data: dict,
+        messages: list,
+        optional_params: dict,
+        litellm_params: dict,
+        custom_llm_provider: str,
+        encoding: Any,
+        api_key: Optional[str],
+        json_mode: Optional[bool],
+    ) -> Union["ModelResponse", "CustomStreamWrapper"]:
+        stream = self._resolve_stream_flag(optional_params, litellm_params)
+        response = self.transformation_handler.transform_response(
+            model=model,
+            raw_response=raw_response,
+            model_response=model_response,
+            logging_obj=logging_obj,
+            request_data=request_data,
+            messages=messages,
+            optional_params=optional_params,
+            litellm_params=litellm_params,
+            encoding=encoding,
+            api_key=api_key,
+            json_mode=json_mode,
+        )
+        self._mark_websearch_converted_stream_if_needed(
+            logging_obj=logging_obj,
+            optional_params=optional_params,
+            litellm_params=litellm_params,
+        )
+        agentic_response = await self._call_agentic_chat_completion_hooks(
+            response=response,
+            model=model,
+            messages=messages,
+            optional_params=optional_params,
+            logging_obj=logging_obj,
+            stream=stream,
+            custom_llm_provider=custom_llm_provider,
+            litellm_params=litellm_params,
+        )
+        final_response = agentic_response if agentic_response is not None else response
+        return self._wrap_chat_response_for_stream_if_needed(
+            response=final_response,
+            stream=stream,
+            model=model,
+            logging_obj=logging_obj,
+        )
+
     def completion(self, *args, **kwargs) -> Union[
         Coroutine[Any, Any, Union["ModelResponse", "CustomStreamWrapper"]],
         "ModelResponse",
@@ -158,6 +357,9 @@ class ResponsesToCompletionBridgeHandler:
         messages = validated_kwargs["messages"]
         optional_params = validated_kwargs["optional_params"]
         litellm_params = validated_kwargs["litellm_params"]
+        if kwargs.get("stream") is not None and "stream" not in optional_params:
+            optional_params = dict(optional_params)
+            optional_params["stream"] = kwargs["stream"]
         headers = validated_kwargs["headers"]
         model_response = validated_kwargs["model_response"]
         logging_obj = validated_kwargs["logging_obj"]
@@ -179,7 +381,7 @@ class ResponsesToCompletionBridgeHandler:
 
         stream = self._resolve_stream_flag(optional_params, litellm_params)
         if isinstance(result, ResponsesAPIResponse):
-            return self.transformation_handler.transform_response(
+            return self._transform_response_and_run_agentic_hooks(
                 model=model,
                 raw_response=result,
                 model_response=model_response,
@@ -188,13 +390,14 @@ class ResponsesToCompletionBridgeHandler:
                 messages=messages,
                 optional_params=optional_params,
                 litellm_params=litellm_params,
+                custom_llm_provider=custom_llm_provider,
                 encoding=kwargs.get("encoding"),
                 api_key=kwargs.get("api_key"),
                 json_mode=kwargs.get("json_mode"),
             )
         elif not stream:
             responses_api_response = self._collect_response_from_stream(result)
-            return self.transformation_handler.transform_response(
+            return self._transform_response_and_run_agentic_hooks(
                 model=model,
                 raw_response=responses_api_response,
                 model_response=model_response,
@@ -203,6 +406,7 @@ class ResponsesToCompletionBridgeHandler:
                 messages=messages,
                 optional_params=optional_params,
                 litellm_params=litellm_params,
+                custom_llm_provider=custom_llm_provider,
                 encoding=kwargs.get("encoding"),
                 api_key=kwargs.get("api_key"),
                 json_mode=kwargs.get("json_mode"),
@@ -234,6 +438,9 @@ class ResponsesToCompletionBridgeHandler:
         messages = validated_kwargs["messages"]
         optional_params = validated_kwargs["optional_params"]
         litellm_params = validated_kwargs["litellm_params"]
+        if kwargs.get("stream") is not None and "stream" not in optional_params:
+            optional_params = dict(optional_params)
+            optional_params["stream"] = kwargs["stream"]
         headers = validated_kwargs["headers"]
         model_response = validated_kwargs["model_response"]
         logging_obj = validated_kwargs["logging_obj"]
@@ -258,7 +465,7 @@ class ResponsesToCompletionBridgeHandler:
 
         stream = self._resolve_stream_flag(optional_params, litellm_params)
         if isinstance(result, ResponsesAPIResponse):
-            return self.transformation_handler.transform_response(
+            return await self._atransform_response_and_run_agentic_hooks(
                 model=model,
                 raw_response=result,
                 model_response=model_response,
@@ -267,6 +474,7 @@ class ResponsesToCompletionBridgeHandler:
                 messages=messages,
                 optional_params=optional_params,
                 litellm_params=litellm_params,
+                custom_llm_provider=custom_llm_provider,
                 encoding=kwargs.get("encoding"),
                 api_key=kwargs.get("api_key"),
                 json_mode=kwargs.get("json_mode"),
@@ -275,7 +483,7 @@ class ResponsesToCompletionBridgeHandler:
             responses_api_response = await self._collect_response_from_stream_async(
                 result
             )
-            return self.transformation_handler.transform_response(
+            return await self._atransform_response_and_run_agentic_hooks(
                 model=model,
                 raw_response=responses_api_response,
                 model_response=model_response,
@@ -284,6 +492,7 @@ class ResponsesToCompletionBridgeHandler:
                 messages=messages,
                 optional_params=optional_params,
                 litellm_params=litellm_params,
+                custom_llm_provider=custom_llm_provider,
                 encoding=kwargs.get("encoding"),
                 api_key=kwargs.get("api_key"),
                 json_mode=kwargs.get("json_mode"),

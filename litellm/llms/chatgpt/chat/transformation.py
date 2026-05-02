@@ -65,6 +65,18 @@ class ChatGPTConfig(OpenAIConfig):
     def post_stream_processing(self, stream: Any) -> Any:
         return ChatGPTToolCallNormalizer(stream)
 
+    def _transform_messages(
+        self, messages: List[AllMessageValues], model: str
+    ) -> List[AllMessageValues]:
+        return [
+            (
+                {**message, "role": "developer"}
+                if message.get("role") == "system"
+                else message
+            )
+            for message in messages
+        ]
+
     def map_openai_params(
         self,
         non_default_params: dict,

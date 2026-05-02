@@ -590,6 +590,83 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
 
         return None
 
+    def _call_agentic_completion_hooks_openai_sync(
+        self,
+        response: Any,
+        model: str,
+        messages: List[Dict],
+        optional_params: Dict,
+        logging_obj: LiteLLMLoggingObj,
+        stream: bool,
+        litellm_params: Dict,
+    ) -> Optional[Any]:
+        from litellm.litellm_core_utils.asyncify import run_async_function
+
+        return run_async_function(
+            self._call_agentic_completion_hooks_openai,
+            response=response,
+            model=model,
+            messages=messages,
+            optional_params=optional_params,
+            logging_obj=logging_obj,
+            stream=stream,
+            litellm_params=litellm_params,
+        )
+
+    @staticmethod
+    def _mark_websearch_converted_stream_if_needed(
+        logging_obj: LiteLLMLoggingObj,
+        litellm_params: Dict,
+        optional_params: Optional[Dict] = None,
+        stream: bool = False,
+    ) -> None:
+        optional_params = optional_params or {}
+        converted_stream = bool(
+            litellm_params.get("_websearch_interception_converted_stream", False)
+            or optional_params.get("_websearch_interception_converted_stream", False)
+        )
+        if (
+            not converted_stream
+            and getattr(logging_obj, "stream", False)
+            and not stream
+        ):
+            from litellm.integrations.websearch_interception.tools import (
+                is_web_search_tool_chat_completion,
+            )
+
+            converted_stream = any(
+                is_web_search_tool_chat_completion(tool)
+                for tool in optional_params.get("tools", []) or []
+            )
+
+        if converted_stream:
+            logging_obj.model_call_details[
+                "websearch_interception_converted_stream"
+            ] = True
+
+    def _maybe_wrap_websearch_converted_chat_stream_response(
+        self,
+        response: Any,
+        logging_obj: LiteLLMLoggingObj,
+        model: str,
+        stream_options: Optional[dict] = None,
+    ) -> Any:
+        websearch_converted_stream = logging_obj.model_call_details.get(
+            "websearch_interception_converted_stream", False
+        )
+        if not websearch_converted_stream or not hasattr(response, "choices"):
+            return response
+
+        verbose_logger.debug(
+            "WebSearchInterception: converting OpenAI chat completion to fake stream"
+        )
+        return self.mock_streaming(
+            response=cast(ModelResponse, response),
+            logging_obj=logging_obj,
+            model=model,
+            stream_options=stream_options,
+        )
+
     def mock_streaming(
         self,
         response: ModelResponse,
@@ -597,6 +674,11 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
         model: str,
         stream_options: Optional[dict] = None,
     ) -> CustomStreamWrapper:
+        from litellm.litellm_core_utils.streaming_handler import (
+            mark_logging_obj_as_streaming,
+        )
+
+        mark_logging_obj_as_streaming(logging_obj)
         completion_stream = MockResponseIterator(model_response=response)
         streaming_response = CustomStreamWrapper(
             completion_stream=completion_stream,
@@ -798,6 +880,25 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
                             model_response_object=model_response,
                             _response_headers=headers,
                         )
+                        self._mark_websearch_converted_stream_if_needed(
+                            logging_obj=logging_obj,
+                            litellm_params=litellm_params,
+                            optional_params=inference_params,
+                            stream=stream or False,
+                        )
+                        agentic_response = (
+                            self._call_agentic_completion_hooks_openai_sync(
+                                response=final_response_obj,
+                                model=model,
+                                messages=messages,
+                                optional_params=inference_params,
+                                logging_obj=logging_obj,
+                                stream=False,
+                                litellm_params=litellm_params,
+                            )
+                        )
+                        if agentic_response is not None:
+                            final_response_obj = agentic_response
                         if fake_stream is True:
                             return self.mock_streaming(
                                 response=cast(ModelResponse, final_response_obj),
@@ -806,7 +907,14 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
                                 stream_options=stream_options,
                             )
 
-                        return final_response_obj
+                        return (
+                            self._maybe_wrap_websearch_converted_chat_stream_response(
+                                response=final_response_obj,
+                                logging_obj=logging_obj,
+                                model=model,
+                                stream_options=stream_options,
+                            )
+                        )
                 except openai.UnprocessableEntityError as e:
                     ## check if body contains unprocessable params - related issue https://github.com/BerriAI/litellm/issues/4800
                     if litellm.drop_params is True or drop_params is True:
@@ -947,6 +1055,12 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
                     hidden_params={"headers": headers},
                     _response_headers=headers,
                 )
+                self._mark_websearch_converted_stream_if_needed(
+                    logging_obj=logging_obj,
+                    litellm_params=litellm_params,
+                    optional_params=optional_params,
+                    stream=False,
+                )
 
                 # Call agentic completion hooks (e.g., for websearch_interception)
                 agentic_response = await self._call_agentic_completion_hooks_openai(
@@ -970,7 +1084,12 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
                         stream_options=stream_options,
                     )
 
-                return final_response_obj
+                return self._maybe_wrap_websearch_converted_chat_stream_response(
+                    response=final_response_obj,
+                    logging_obj=logging_obj,
+                    model=model,
+                    stream_options=stream_options,
+                )
             except openai.UnprocessableEntityError as e:
                 ## check if body contains unprocessable params - related issue https://github.com/BerriAI/litellm/issues/4800
                 if litellm.drop_params is True or drop_params is True:

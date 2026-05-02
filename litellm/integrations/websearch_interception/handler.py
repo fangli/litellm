@@ -19,6 +19,7 @@ from litellm.integrations.custom_logger import CustomLogger
 from litellm.integrations.websearch_interception.tools import (
     get_litellm_web_search_tool,
     get_litellm_web_search_tool_openai,
+    get_litellm_web_search_tool_responses_api,
     is_web_search_tool,
     is_web_search_tool_chat_completion,
 )
@@ -33,7 +34,7 @@ from litellm.types.integrations.custom_logger import (
     AgenticLoopRequestPatch,
 )
 from litellm.types.llms.openai import AllMessageValues
-from litellm.types.utils import LlmProviders
+from litellm.types.utils import CallTypes, LlmProviders
 from litellm.utils import ProviderConfigManager
 
 
@@ -73,6 +74,40 @@ class WebSearchInterceptionLogger(CustomLogger):
             ]
         self.search_tool_name = search_tool_name
         self._request_has_websearch = False  # Track if current request has web search
+
+    @staticmethod
+    def _is_responses_call_type(call_type: Optional[Any]) -> bool:
+        call_type_value = getattr(call_type, "value", call_type)
+        return call_type_value in (
+            CallTypes.responses.value,
+            CallTypes.aresponses.value,
+        )
+
+    @staticmethod
+    def _should_preserve_native_responses_web_search(
+        kwargs: Dict[str, Any],
+        call_type: Optional[Any],
+        custom_llm_provider: str,
+    ) -> bool:
+        if not WebSearchInterceptionLogger._is_responses_call_type(call_type):
+            return False
+        if kwargs.get("use_chat_completions_api") is True:
+            return False
+
+        try:
+            return (
+                ProviderConfigManager.get_provider_responses_api_config(
+                    provider=custom_llm_provider,
+                    model=kwargs.get("model", ""),
+                )
+                is not None
+            )
+        except Exception:
+            verbose_logger.debug(
+                "WebSearchInterception: unable to determine native Responses support",
+                exc_info=True,
+            )
+            return False
 
     async def try_short_circuit_search(
         self,
@@ -221,11 +256,29 @@ class WebSearchInterceptionLogger(CustomLogger):
 
         # Convert native/custom web_search tools to LiteLLM standard
         converted_tools = []
+        use_responses_tool_shape = self._is_responses_call_type(call_type)
+        preserve_native_responses_web_search = (
+            self._should_preserve_native_responses_web_search(
+                kwargs=kwargs,
+                call_type=call_type,
+                custom_llm_provider=custom_llm_provider,
+            )
+        )
+        converted_any_websearch_tool = False
         for tool in tools:
             if is_web_search_tool(tool):
+                if preserve_native_responses_web_search:
+                    converted_tools.append(tool)
+                    continue
+
                 # Convert to LiteLLM standard web search tool
-                converted_tool = get_litellm_web_search_tool_openai()
+                converted_tool = (
+                    get_litellm_web_search_tool_responses_api()
+                    if use_responses_tool_shape
+                    else get_litellm_web_search_tool_openai()
+                )
                 converted_tools.append(converted_tool)
+                converted_any_websearch_tool = True
                 verbose_logger.debug(
                     f"WebSearchInterception: Converted {tool.get('name', 'unknown')} "
                     f"(type={tool.get('type', 'none')}) to {LITELLM_WEB_SEARCH_TOOL_NAME}"
@@ -236,7 +289,7 @@ class WebSearchInterceptionLogger(CustomLogger):
 
         kwargs["tools"] = converted_tools
 
-        if kwargs.get("stream"):
+        if converted_any_websearch_tool and kwargs.get("stream"):
             verbose_logger.debug(
                 "WebSearchInterception: deployment hook converting stream=True to stream=False"
             )

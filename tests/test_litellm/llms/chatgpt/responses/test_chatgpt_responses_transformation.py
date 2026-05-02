@@ -103,8 +103,65 @@ class TestChatGPTResponsesAPITransformation:
         )
 
         assert request["stream"] is True
+        assert request["input"] == [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hi"}],
+            }
+        ]
         assert "reasoning.encrypted_content" in request["include"]
         assert request["instructions"].startswith("You are Codex, based on GPT-5.")
+
+    def test_chatgpt_preserves_caller_instructions(self):
+        config = ChatGPTResponsesAPIConfig()
+        request = config.transform_responses_api_request(
+            model="chatgpt/gpt-5.4-mini",
+            input="hi",
+            response_api_optional_request_params={
+                "instructions": "Use the caller supplied instructions.",
+            },
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+        )
+
+        assert request["instructions"] == "Use the caller supplied instructions."
+
+    def test_chatgpt_preserves_empty_caller_instructions(self):
+        config = ChatGPTResponsesAPIConfig()
+        request = config.transform_responses_api_request(
+            model="chatgpt/gpt-5.4-mini",
+            input="hi",
+            response_api_optional_request_params={"instructions": ""},
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+        )
+
+        assert request["instructions"] == ""
+
+    def test_chatgpt_rewrites_direct_responses_system_input_to_developer(self):
+        config = ChatGPTResponsesAPIConfig()
+        request = config.transform_responses_api_request(
+            model="chatgpt/gpt-5.4-mini",
+            input=[
+                {
+                    "type": "message",
+                    "role": "system",
+                    "content": [{"type": "input_text", "text": "follow policy"}],
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hello"}],
+                },
+            ],
+            response_api_optional_request_params={},
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+        )
+
+        assert request["input"][0]["role"] == "developer"
+        assert request["input"][1]["role"] == "user"
 
     @pytest.mark.parametrize(
         "model_name",
@@ -201,3 +258,81 @@ class TestChatGPTResponsesAPITransformation:
         )
 
         assert parsed.output_text == "Hello!"
+
+    def test_chatgpt_non_stream_sse_response_reconstructs_function_call_output(self):
+        config = ChatGPTResponsesAPIConfig()
+        response_payload = {
+            "id": "resp_test",
+            "object": "response",
+            "created_at": 1700000000,
+            "status": "completed",
+            "model": "gpt-5.4-mini",
+            "output": [],
+        }
+        sse_body = "\n".join(
+            [
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "response.output_item.added",
+                        "output_index": 0,
+                        "item": {
+                            "id": "fc_123",
+                            "type": "function_call",
+                            "call_id": "call_123",
+                            "name": "litellm_web_search",
+                            "arguments": "",
+                        },
+                    }
+                ),
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "response.function_call_arguments.delta",
+                        "output_index": 0,
+                        "delta": '{"query":"LiteLLM',
+                    }
+                ),
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "response.function_call_arguments.delta",
+                        "output_index": 0,
+                        "delta": ' Responses"}',
+                    }
+                ),
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "response.function_call_arguments.done",
+                        "output_index": 0,
+                        "arguments": '{"query":"LiteLLM Responses"}',
+                    }
+                ),
+                f"data: {json.dumps({'type': 'response.completed', 'response': response_payload})}",
+                "data: [DONE]",
+                "",
+            ]
+        )
+        raw_response = httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, text=sse_body
+        )
+        logging_obj = MagicMock()
+
+        parsed = config.transform_response_api_response(
+            model="chatgpt/gpt-5.4-mini",
+            raw_response=raw_response,
+            logging_obj=logging_obj,
+        )
+
+        assert len(parsed.output) == 1
+        function_call = parsed.output[0]
+        function_call_dict = (
+            function_call.model_dump()
+            if hasattr(function_call, "model_dump")
+            else function_call
+        )
+        assert function_call_dict["type"] == "function_call"
+        assert function_call_dict["name"] == "litellm_web_search"
+        assert function_call_dict["call_id"] == "call_123"
+        assert function_call_dict["arguments"] == '{"query":"LiteLLM Responses"}'

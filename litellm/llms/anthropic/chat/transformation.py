@@ -1434,8 +1434,14 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
             headers=headers, optional_params=optional_params
         )
 
+        # Keep caller-owned Chat Completions history intact for downstream hooks
+        # (e.g. web-search interception continuations) while still reusing the
+        # existing Anthropic translator that removes system messages from its input.
+        messages_for_provider = list(messages)
         # Separate system prompt from rest of message
-        anthropic_system_message_list = self.translate_system_message(messages=messages)
+        anthropic_system_message_list = self.translate_system_message(
+            messages=messages_for_provider
+        )
         # Handling anthropic API Prompt Caching
         if len(anthropic_system_message_list) > 0:
             optional_params["system"] = anthropic_system_message_list
@@ -1443,13 +1449,15 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
         try:
             anthropic_messages = anthropic_messages_pt(
                 model=model,
-                messages=messages,
+                messages=messages_for_provider,
                 llm_provider=self.custom_llm_provider or "anthropic",
             )
         except Exception as e:
             raise AnthropicError(
                 status_code=400,
-                message="{}\nReceived Messages={}".format(str(e), messages),
+                message="{}\nReceived Messages={}".format(
+                    str(e), messages_for_provider
+                ),
             )  # don't use verbose_logger.exception, if exception is raised
 
         ## Auto-strip advisor blocks from history if advisor tool is absent.
