@@ -49,6 +49,7 @@ def convert_model_response_to_streaming(
             created=model_response.created,
             model=model_response.model,
             choices=streaming_choices,
+            usage=getattr(model_response, "usage", None),
         )
         return processed_chunk
     except Exception as e:

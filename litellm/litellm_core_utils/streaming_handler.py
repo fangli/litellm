@@ -1411,6 +1411,10 @@ class CustomStreamWrapper:
                     self.response_id = chunk.id
                 if hasattr(chunk, "system_fingerprint"):
                     self.system_fingerprint = chunk.system_fingerprint
+                # cached_response is used when agentic hooks fake-stream a
+                # non-stream response; keep usage for downstream adapters.
+                if getattr(chunk, "usage", None) is not None:
+                    model_response.usage = chunk.usage
                 if response_obj["is_finished"]:
                     self.received_finish_reason = response_obj["finish_reason"]
             else:  # openai / azure chat model
@@ -2243,6 +2247,9 @@ class CustomStreamWrapper:
             else:
                 self.sent_last_chunk = True
                 processed_chunk = self.finish_reason_handler()
+                if self.stream_options is None:
+                    usage = calculate_total_usage(chunks=self.chunks)
+                    processed_chunk._hidden_params["usage"] = usage
                 return processed_chunk
         except httpx.TimeoutException as e:  # if httpx read timeout error occues
             traceback_exception = traceback.format_exc()

@@ -1,6 +1,7 @@
 import os
 import sys
 from typing import Any, cast
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -32,6 +33,69 @@ from litellm.types.utils import (
     StreamingChoices,
     Usage,
 )
+
+
+@pytest.mark.asyncio
+async def test_anthropic_stream_preserves_usage_from_fake_chat_stream():
+    """
+    Web-search interception can convert a requested Anthropic stream into a
+    non-stream Chat Completions follow-up, then fake-stream the final response.
+    The Anthropic SSE adapter still needs the final ModelResponse usage so
+    clients do not see input/output tokens as zero.
+    """
+    from litellm.litellm_core_utils.streaming_handler import CustomStreamWrapper
+    from litellm.llms.anthropic.experimental_pass_through.adapters.streaming_iterator import (
+        AnthropicStreamWrapper,
+    )
+    from litellm.llms.base_llm.base_model_iterator import (
+        convert_model_response_to_streaming,
+    )
+
+    logging_obj = Mock()
+    logging_obj.model_call_details = {}
+    logging_obj.stream_options = None
+    logging_obj.messages = []
+    logging_obj.completion_start_time = None
+    logging_obj._update_completion_start_time = Mock()
+    logging_obj.async_success_handler = AsyncMock()
+    logging_obj.success_handler = Mock()
+    logging_obj._llm_caching_handler = None
+
+    final_response = ModelResponse(
+        id="chatcmpl_usage",
+        choices=[
+            Choices(
+                finish_reason="stop",
+                index=0,
+                message=Message(role="assistant", content="search answer"),
+            )
+        ],
+        created=1700000000,
+        model="gpt-5.4-mini",
+        object="chat.completion",
+        usage=Usage(prompt_tokens=321, completion_tokens=45, total_tokens=366),
+    )
+    fake_stream_chunk = convert_model_response_to_streaming(final_response)
+    fake_chat_stream = CustomStreamWrapper(
+        completion_stream=iter([fake_stream_chunk]),
+        model="gpt-5.4-mini",
+        custom_llm_provider="cached_response",
+        logging_obj=logging_obj,
+    )
+    anthropic_stream = AnthropicStreamWrapper(
+        completion_stream=fake_chat_stream,
+        model="chatgpt/gpt-5.4-mini",
+    )
+
+    events = []
+    async for event in anthropic_stream:
+        events.append(event)
+
+    message_delta = next(
+        event for event in events if event.get("type") == "message_delta"
+    )
+    assert message_delta["usage"]["input_tokens"] == 321
+    assert message_delta["usage"]["output_tokens"] == 45
 
 
 def test_translate_streaming_openai_chunk_to_anthropic_content_block():
