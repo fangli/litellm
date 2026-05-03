@@ -1312,6 +1312,7 @@ async def test_ui_view_session_spend_logs_pagination(client, monkeypatch):
         async def query_raw(self, sql_query, session_id, page_size, skip):
             # Endpoint uses raw SQL for pagination - verify params
             assert session_id == "session-123"
+            assert 'ORDER BY "startTime" DESC' in sql_query
             assert page_size == 1
             assert skip == 1  # page=2, page_size=1
             return [mock_spend_logs[1]]
@@ -1338,6 +1339,51 @@ async def test_ui_view_session_spend_logs_pagination(client, monkeypatch):
     assert data["total_pages"] == 2
     assert len(data["data"]) == 1
     assert data["data"][0]["request_id"] == "req2"
+
+
+@pytest.mark.asyncio
+async def test_ui_view_session_spend_logs_default_page_size(client, monkeypatch):
+    mock_spend_logs = [
+        {
+            "id": "log1",
+            "request_id": "req1",
+            "session_id": "session-123",
+            "startTime": "2024-01-01T00:00:00Z",
+        },
+    ]
+
+    class MockDB:
+        async def count(self, *args, **kwargs):
+            assert kwargs.get("where") == {"session_id": "session-123"}
+            return len(mock_spend_logs)
+
+        async def query_raw(self, sql_query, session_id, page_size, skip):
+            assert session_id == "session-123"
+            assert 'ORDER BY "startTime" DESC' in sql_query
+            assert page_size == 200
+            assert skip == 0
+            return mock_spend_logs
+
+    class MockPrismaClient:
+        def __init__(self):
+            self.db = MockDB()
+            self.db.litellm_spendlogs = self.db
+
+    mock_prisma_client = MockPrismaClient()
+    monkeypatch.setattr("litellm.proxy.proxy_server.prisma_client", mock_prisma_client)
+
+    response = client.get(
+        "/spend/logs/session/ui",
+        params={"session_id": "session-123"},
+        headers={"Authorization": "Bearer sk-test"},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["page"] == 1
+    assert data["page_size"] == 200
+    assert data["total_pages"] == 1
+    assert data["data"][0]["request_id"] == "req1"
 
 
 @pytest.mark.asyncio
