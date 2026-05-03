@@ -2147,6 +2147,28 @@ def test_sonnet_4_6_reasoning_effort_to_transform_request_payload():
     assert "budget_tokens" not in result["thinking"]
 
 
+def test_transform_request_drops_websearch_internal_stream_marker():
+    """
+    Web-search interception stores converted-stream state in LiteLLM internals.
+    That marker is used after the provider response returns and must not be
+    serialized into Anthropic-compatible provider request bodies.
+    """
+    config = AnthropicConfig()
+    result = config.transform_request(
+        model="claude-haiku-4-5-20251001",
+        messages=[{"role": "user", "content": "Ping"}],
+        optional_params={
+            "max_tokens": 1024,
+            "_websearch_interception_converted_stream": True,
+        },
+        litellm_params={"_websearch_interception_converted_stream": True},
+        headers={},
+    )
+
+    assert "_websearch_interception_converted_stream" not in result
+    assert result["max_tokens"] == 1024
+
+
 def test_reasoning_effort_maps_to_budget_thinking_for_non_opus_4_6():
     """
     Test that reasoning_effort maps to budget-based thinking config for non-Opus 4.6 models.

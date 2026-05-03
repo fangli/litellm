@@ -438,7 +438,11 @@ def filter_internal_params(
         internal_params.update(additional_internal_params)
 
     # Filter out internal parameters
-    return {k: v for k, v in data.items() if k not in internal_params}
+    return {
+        k: v
+        for k, v in data.items()
+        if k not in internal_params and not k.startswith("_websearch_interception")
+    }
 
 
 def redact_nested_match_and_regex_keys(

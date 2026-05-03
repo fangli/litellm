@@ -96,6 +96,22 @@ class TestOpenAIGPTConfig:
         supported_params = self.config.get_supported_openai_params("gpt-4.1")
         assert "prompt_cache_key" in supported_params
 
+    def test_transform_request_drops_websearch_internal_marker(self):
+        """Internal web-search stream markers must not reach OpenAI Chat."""
+        result = self.config.transform_request(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "Ping"}],
+            optional_params={
+                "stream": False,
+                "_websearch_interception_converted_stream": True,
+            },
+            litellm_params={"_websearch_interception_converted_stream": True},
+            headers={},
+        )
+
+        assert "_websearch_interception_converted_stream" not in result
+        assert result["stream"] is False
+
 
 class TestGetOptionalParamsIntegration:
     """Integration tests using litellm.get_optional_params()"""

@@ -3151,6 +3151,7 @@ all_litellm_params = (
         "search_tool_name",
         "order",
         "enable_json_schema_validation",
+        "_websearch_interception_converted_stream",
     ]
     + list(StandardCallbackDynamicParams.__annotations__.keys())
     + list(CustomPricingLiteLLMParams.model_fields.keys())

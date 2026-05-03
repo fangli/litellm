@@ -21,7 +21,10 @@ from typing import (
 import httpx
 
 import litellm
-from litellm.litellm_core_utils.core_helpers import map_finish_reason
+from litellm.litellm_core_utils.core_helpers import (
+    filter_internal_params,
+    map_finish_reason,
+)
 from litellm.litellm_core_utils.llm_response_utils.convert_dict_to_response import (
     _extract_reasoning_content,
     _handle_invalid_parallel_tool_calls,
@@ -442,6 +445,7 @@ class OpenAIGPTConfig(BaseLLMModelInfo, BaseConfig):
             optional_params["tools"] = tools
 
         optional_params.pop("max_retries", None)
+        optional_params = filter_internal_params(optional_params)
 
         return {
             "model": model,

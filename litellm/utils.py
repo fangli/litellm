@@ -3675,7 +3675,10 @@ def filter_out_litellm_params(kwargs: dict) -> dict:
     """
 
     return {
-        key: value for key, value in kwargs.items() if key not in all_litellm_params
+        key: value
+        for key, value in kwargs.items()
+        if key not in all_litellm_params
+        and not key.startswith("_websearch_interception")
     }
 
 

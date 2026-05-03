@@ -19,6 +19,8 @@ def test_filter_out_litellm_params():
         "proxy_server_request": {"url": "http://example.com"},
         "secret_fields": {"api_key": "secret"},
         "custom_param": "should_be_kept",
+        "_websearch_interception_converted_stream": True,
+        "_websearch_interception_other": "internal",
     }
 
     filtered = filter_out_litellm_params(kwargs=kwargs)
@@ -34,3 +36,5 @@ def test_filter_out_litellm_params():
     assert "litellm_trace_id" not in filtered
     assert "proxy_server_request" not in filtered
     assert "secret_fields" not in filtered
+    assert "_websearch_interception_converted_stream" not in filtered
+    assert "_websearch_interception_other" not in filtered

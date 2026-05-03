@@ -86,6 +86,22 @@ class TestOpenAIResponsesAPIConfig:
 
         self.validate_responses_api_request_params(result, expected_fields)
 
+    def test_transform_responses_api_request_drops_websearch_internal_marker(self):
+        """Internal web-search stream markers must not reach OpenAI Responses."""
+        result = self.config.transform_responses_api_request(
+            model=self.model,
+            input="Ping",
+            response_api_optional_request_params={
+                "stream": False,
+                "_websearch_interception_converted_stream": True,
+            },
+            litellm_params={"_websearch_interception_converted_stream": True},
+            headers={},
+        )
+
+        assert "_websearch_interception_converted_stream" not in result
+        assert result["stream"] is False
+
     def test_transform_streaming_response(self):
         """Test streaming response transformation"""
         # Test with a text delta event
@@ -547,7 +563,12 @@ class TestOpenAIResponsesAPIConfig:
         """Base helper strips ``namespace`` from custom_tool_call for every provider path."""
         inp = [
             {"type": "function_call", "call_id": "a", "name": "f", "namespace": "keep"},
-            {"type": "custom_tool_call", "call_id": "b", "name": "c", "namespace": "drop"},
+            {
+                "type": "custom_tool_call",
+                "call_id": "b",
+                "name": "c",
+                "namespace": "drop",
+            },
         ]
         out = BaseResponsesAPIConfig.strip_custom_tool_call_namespace_from_responses_input(
             inp
