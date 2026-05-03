@@ -190,6 +190,7 @@ class TestChatGPTResponsesAPITransformation:
                 "truncation": "auto",
                 "previous_response_id": "resp_123",
                 "reasoning": {"effort": "medium"},
+                "service_tier": "priority",
                 "tools": [{"type": "function", "function": {"name": "hello"}}],
                 "tool_choice": {"type": "function", "function": {"name": "hello"}},
             },
@@ -208,6 +209,7 @@ class TestChatGPTResponsesAPITransformation:
         assert request["truncation"] == "auto"
         assert request["previous_response_id"] == "resp_123"
         assert request["reasoning"] == {"effort": "medium"}
+        assert request["service_tier"] == "priority"
         assert request["tools"] == [{"type": "function", "function": {"name": "hello"}}]
         assert request["tool_choice"] == {
             "type": "function",

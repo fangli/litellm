@@ -372,6 +372,7 @@ class ChatGPTResponsesAPIConfig(OpenAIResponsesAPIConfig):
             "reasoning",
             "previous_response_id",
             "truncation",
+            "service_tier",
         }
 
         return {k: v for k, v in request.items() if k in allowed_keys}
